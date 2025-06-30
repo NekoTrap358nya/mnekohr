@@ -71,49 +71,75 @@ local function apply_temperature_effects(player, temp_state)
         return
     end
     
-    local vital_manager = player:call("getVitalManager")
-    if not vital_manager then
-        return
-    end
+    local success, err = pcall(function()
+        local vital_manager = player:call("getVitalManager")
+        if not vital_manager then
+            return
+        end
+        
+        if temp_state == TEMP_HOT then
+            -- Hot environment: gradual stamina drain
+            local current_stamina = vital_manager:call("getStamina")
+            if current_stamina and current_stamina > 10 then
+                vital_manager:call("addStamina", -2.0)
+            end
+            
+            -- Show hot effect message occasionally
+            if temp_check_timer % 30 == 0 then
+                show_temperature_message("You feel the scorching heat...", "RED")
+            end
+            
+        elseif temp_state == TEMP_COLD then
+            -- Cold environment: slower health regeneration and movement
+            local current_health = vital_manager:call("getHp")
+            local max_health = vital_manager:call("getMaxHp")
+            
+            -- Reduce natural health regeneration
+            if current_health and max_health and current_health < max_health then
+                vital_manager:call("addHp", -1.0)
+            end
+            
+            -- Show cold effect message occasionally
+            if temp_check_timer % 30 == 0 then
+                show_temperature_message("You shiver from the cold...", "CYAN")
+            end
+        end
+    end)
     
-    if temp_state == TEMP_HOT then
-        -- Hot environment: gradual stamina drain
-        local current_stamina = vital_manager:call("getStamina")
-        if current_stamina > 10 then
-            vital_manager:call("addStamina", -2.0)
-        end
-        
-        -- Show hot effect message occasionally
-        if temp_check_timer % 30 == 0 then
-            show_temperature_message("You feel the scorching heat...", "RED")
-        end
-        
-    elseif temp_state == TEMP_COLD then
-        -- Cold environment: slower health regeneration and movement
-        local current_health = vital_manager:call("getHp")
-        local max_health = vital_manager:call("getMaxHp")
-        
-        -- Reduce natural health regeneration
-        if current_health < max_health then
-            vital_manager:call("addHp", -1.0)
-        end
-        
-        -- Show cold effect message occasionally
-        if temp_check_timer % 30 == 0 then
-            show_temperature_message("You shiver from the cold...", "CYAN")
-        end
+    if not success then
+        log.error("Error applying temperature effects: " .. tostring(err))
     end
 end
 
 -- Show temperature-related messages
 local function show_temperature_message(message, color)
-    local string_array = sdk.create_managed_array("System.String", 1):add_ref()
-    local colored_message = string.format("<COL %s>%s</COL>", color, message)
-    string_array:set_Item(0, sdk.create_managed_string(colored_message))
+    -- Add nil checks to prevent runtime errors
+    if not message or not color then
+        return
+    end
     
-    local gui_manager = sdk.get_managed_singleton("snow.gui.GuiManager")
-    if gui_manager then
-        gui_manager:reqOpenDialog(1, string_array)
+    local success, err = pcall(function()
+        local string_array = sdk.create_managed_array("System.String", 1)
+        if not string_array then
+            return
+        end
+        
+        string_array = string_array:add_ref()
+        local colored_message = string.format("<COL %s>%s</COL>", color, message)
+        local managed_string = sdk.create_managed_string(colored_message)
+        
+        if managed_string then
+            string_array:set_Item(0, managed_string)
+            
+            local gui_manager = sdk.get_managed_singleton("snow.gui.GuiManager")
+            if gui_manager then
+                gui_manager:reqOpenDialog(1, string_array)
+            end
+        end
+    end)
+    
+    if not success then
+        log.error("Error showing temperature message: " .. tostring(err))
     end
 end
 
@@ -170,90 +196,159 @@ local function update_temperature_system()
 end
 
 -- Hook into item usage to detect cold/hot drink consumption
-sdk.hook(
-    sdk.find_type_definition("snow.player.PlayerItemManager"):get_method("useItem"),
-    function(args)
-        local item_id = sdk.to_int64(args[3])
-        
-        if item_id == COLD_DRINK_ID then
-            if use_cold_drink() then
-                -- Prevent normal item consumption if drink was effective
-                return sdk.PreHookResult.SKIP_ORIGINAL
+local player_item_manager_type = sdk.find_type_definition("snow.player.PlayerItemManager")
+if player_item_manager_type then
+    local use_item_method = player_item_manager_type:get_method("useItem")
+    if use_item_method then
+        sdk.hook(
+            use_item_method,
+            function(args)
+                local success, err = pcall(function()
+                    if not args or not args[3] then
+                        return
+                    end
+                    
+                    local item_id = sdk.to_int64(args[3])
+                    
+                    if item_id == COLD_DRINK_ID then
+                        if use_cold_drink() then
+                            -- Prevent normal item consumption if drink was effective
+                            return sdk.PreHookResult.SKIP_ORIGINAL
+                        end
+                    elseif item_id == HOT_DRINK_ID then
+                        if use_hot_drink() then
+                            -- Prevent normal item consumption if drink was effective
+                            return sdk.PreHookResult.SKIP_ORIGINAL
+                        end
+                    end
+                end)
+                
+                if not success then
+                    log.error("Error in item usage hook: " .. tostring(err))
+                end
             end
-        elseif item_id == HOT_DRINK_ID then
-            if use_hot_drink() then
-                -- Prevent normal item consumption if drink was effective
-                return sdk.PreHookResult.SKIP_ORIGINAL
-            end
-        end
+        )
+    else
+        log.error("Could not find useItem method")
     end
-)
+else
+    log.error("Could not find PlayerItemManager type")
+end
 
 -- Hook into game update loop for temperature system
-sdk.hook(
-    sdk.find_type_definition("snow.GameManager"):get_method("lateUpdate"),
-    function(args)
-        update_temperature_system()
+local game_manager_type = sdk.find_type_definition("snow.GameManager")
+if game_manager_type then
+    local late_update_method = game_manager_type:get_method("lateUpdate")
+    if late_update_method then
+        sdk.hook(
+            late_update_method,
+            function(args)
+                local success, err = pcall(function()
+                    update_temperature_system()
+                end)
+                
+                if not success then
+                    log.error("Error in temperature system update: " .. tostring(err))
+                end
+            end
+        )
+    else
+        log.error("Could not find lateUpdate method")
     end
-)
+else
+    log.error("Could not find GameManager type")
+end
 
 -- Hook quest start to reset temperature state
-sdk.hook(
-    sdk.find_type_definition("snow.QuestManager"):get_method("questStart"),
-    function(args)
-        player_temp_state = TEMP_NORMAL
-        drink_effect_timer = 0
-        temp_check_timer = 0
-        is_temp_protected = false
-        show_temperature_message("Temperature system initialized for this quest.", "WHITE")
+local quest_manager_type = sdk.find_type_definition("snow.QuestManager")
+if quest_manager_type then
+    local quest_start_method = quest_manager_type:get_method("questStart")
+    if quest_start_method then
+        sdk.hook(
+            quest_start_method,
+            function(args)
+                local success, err = pcall(function()
+                    player_temp_state = TEMP_NORMAL
+                    drink_effect_timer = 0
+                    temp_check_timer = 0
+                    is_temp_protected = false
+                    show_temperature_message("Temperature system initialized for this quest.", "WHITE")
+                end)
+                
+                if not success then
+                    log.error("Error in quest start hook: " .. tostring(err))
+                end
+            end
+        )
+    else
+        log.error("Could not find questStart method")
     end
-)
-
--- Hook quest end to clean up
-sdk.hook(
-    sdk.find_type_definition("snow.QuestManager"):get_method("questEnd"),
-    function(args)
-        player_temp_state = TEMP_NORMAL
-        drink_effect_timer = 0
-        temp_check_timer = 0
-        is_temp_protected = false
+    
+    -- Hook quest end to clean up
+    local quest_end_method = quest_manager_type:get_method("questEnd")
+    if quest_end_method then
+        sdk.hook(
+            quest_end_method,
+            function(args)
+                local success, err = pcall(function()
+                    player_temp_state = TEMP_NORMAL
+                    drink_effect_timer = 0
+                    temp_check_timer = 0
+                    is_temp_protected = false
+                end)
+                
+                if not success then
+                    log.error("Error in quest end hook: " .. tostring(err))
+                end
+            end
+        )
+    else
+        log.error("Could not find questEnd method")
     end
-)
+else
+    log.error("Could not find QuestManager type")
+end
 
 -- ImGui interface for mod configuration
 re.on_draw_ui(function()
-    if imgui.tree_node(mod_name .. " v" .. mod_version) then
-        imgui.text("Current Temperature State: " .. 
-            (player_temp_state == TEMP_HOT and "HOT" or 
-             player_temp_state == TEMP_COLD and "COLD" or "NORMAL"))
-        
-        imgui.text("Protection Active: " .. (is_temp_protected and "YES" or "NO"))
-        
-        if is_temp_protected then
-            imgui.text("Protection Time Left: " .. math.floor(drink_effect_timer) .. " seconds")
+    local success, err = pcall(function()
+        if imgui.tree_node(mod_name .. " v" .. mod_version) then
+            imgui.text("Current Temperature State: " .. 
+                (player_temp_state == TEMP_HOT and "HOT" or 
+                 player_temp_state == TEMP_COLD and "COLD" or "NORMAL"))
+            
+            imgui.text("Protection Active: " .. (is_temp_protected and "YES" or "NO"))
+            
+            if is_temp_protected then
+                imgui.text("Protection Time Left: " .. math.floor(drink_effect_timer) .. " seconds")
+            end
+            
+            imgui.separator()
+            
+            if imgui.button("Test Cold Drink") then
+                use_cold_drink()
+            end
+            
+            imgui.same_line()
+            
+            if imgui.button("Test Hot Drink") then
+                use_hot_drink()
+            end
+            
+            imgui.separator()
+            imgui.text("Area Temperature Mapping:")
+            for area_id, temp in pairs(area_temperatures) do
+                local temp_name = temp == TEMP_HOT and "HOT" or 
+                                 temp == TEMP_COLD and "COLD" or "NORMAL"
+                imgui.text("Area " .. area_id .. ": " .. temp_name)
+            end
+            
+            imgui.tree_pop()
         end
-        
-        imgui.separator()
-        
-        if imgui.button("Test Cold Drink") then
-            use_cold_drink()
-        end
-        
-        imgui.same_line()
-        
-        if imgui.button("Test Hot Drink") then
-            use_hot_drink()
-        end
-        
-        imgui.separator()
-        imgui.text("Area Temperature Mapping:")
-        for area_id, temp in pairs(area_temperatures) do
-            local temp_name = temp == TEMP_HOT and "HOT" or 
-                             temp == TEMP_COLD and "COLD" or "NORMAL"
-            imgui.text("Area " .. area_id .. ": " .. temp_name)
-        end
-        
-        imgui.tree_pop()
+    end)
+    
+    if not success then
+        log.error("Error in ImGui interface: " .. tostring(err))
     end
 end)
 
